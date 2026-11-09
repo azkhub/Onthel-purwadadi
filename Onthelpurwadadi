@@ -1,5 +1,5 @@
 -- KERJA HUB LITE (TANPA mini game) | Onthel Purwadadi | By Azk & Claude
--- Isi: duit live, auto kurir, TP gerobak, auto layani bakso, CLAIM MEME (manual), MiniGame Hub (execute/salin),
+-- Isi: duit live, auto kurir, TP gerobak, auto layani bakso, CLAIM MEME (manual + auto claim all), MiniGame Hub (execute/salin),
 --      ANTI GAMEPLAY PAUSED, buka/tutup JobGui, delay bisa diatur
 -- Tombol buka/tutup bulat berlogo (bisa digeser), window bisa digeser, animasi buka/tutup, GUI tahan hilang
 -- TARUH DI: StarterPlayer > StarterPlayerScripts (LocalScript) atau jalankan lewat executor
@@ -248,6 +248,7 @@ local function startKerjaHub()
 	local kurirOn, baksoOn = false, false
 	local antiPause = true
 	local kurirRun = 0
+	local memeAllOn, memeAllRun, memeDelay = false, 0, 1
 	local pauseJobs = false -- true saat klaim meme (job lain menunggu sebentar)
 	local delayTP, delayAfter = 0.25, 0.2
 	local lastServe = 0
@@ -722,6 +723,59 @@ local function startKerjaHub()
 		return n > 0
 	end
 
+	------------------------------------------------------------
+	-- AUTO CLAIM ALL MEME: meme upin + meme 1/2/3, jeda memeDelay antar meme
+	------------------------------------------------------------
+	local function memeTargets()
+		local list = {}
+		local upin = workspace:FindFirstChild("meme upin")
+		if upin then list[#list + 1] = upin end
+		local folder = workspace:FindFirstChild("meme")
+		if folder then
+			for _, nm in ipairs({"meme 1", "meme 2", "meme 3"}) do
+				local m = folder:FindFirstChild(nm)
+				if m then list[#list + 1] = m end
+			end
+		end
+		return list
+	end
+
+	local function toggleMemeAll()
+		memeAllOn = not memeAllOn
+		paint()
+		if not memeAllOn then return end
+		memeAllRun = memeAllRun + 1
+		local my = memeAllRun
+		task.spawn(function()
+			while memeAllOn and memeAllRun == my do
+				local targets = memeTargets()
+				if #targets == 0 then
+					st.Text = "Meme: tidak ada yang ketemu"
+					task.wait(memeDelay)
+				else
+					pauseJobs = true
+					task.wait(0.5) -- biar langkah job yang sedang jalan selesai dulu
+					local root = getRoot()
+					local back = root and root.CFrame
+					local done = 0
+					for _, m in ipairs(targets) do
+						if not memeAllOn or memeAllRun ~= my then break end
+						st.Text = "Meme: klaim " .. m.Name .. "..."
+						if visitPrompts(m) > 0 then done = done + 1 end
+						task.wait(memeDelay)
+					end
+					root = getRoot()
+					if root and back then root.CFrame = back end
+					pauseJobs = false
+					st.Text = "Meme: " .. done .. "/" .. #targets .. " diklaim"
+					task.wait(memeDelay)
+				end
+			end
+			pauseJobs = false
+			if memeAllRun == my then st.Text = "Auto claim meme OFF" end
+		end)
+	end
+
 
 	------------------------------------------------------------
 	-- ANTI GAMEPLAY PAUSED (hanya untuk mencegah game "pause" karena streaming)
@@ -783,7 +837,7 @@ local function startKerjaHub()
 	end)
 
 	local function stopAll()
-		kurirOn, baksoOn = false, false
+		kurirOn, baksoOn, memeAllOn = false, false, false
 		paint()
 		st.Text = "Semua OFF"
 	end
@@ -825,6 +879,8 @@ local function startKerjaHub()
 	mkSwitch("AUTO LAYANI BAKSO", function() return baksoOn end, toggleBakso)
 	section("MEME")
 	mkWide("CLAIM MEME", C(190, 120, 40), function() task.spawn(claimMeme) end)
+	mkSwitch("AUTO CLAIM ALL MEME", function() return memeAllOn end, toggleMemeAll)
+	mkStepper("DELAY CLAIM MEME (dtk)", function() return memeDelay end, function(v) memeDelay = v end, 0.1, 60, 0.1)
 	section("ANTI PAUSE")
 	mkSwitch("ANTI GAMEPLAY PAUSED", function() return antiPause end, toggleAnti)
 	section("PENGATURAN")
@@ -832,6 +888,42 @@ local function startKerjaHub()
 	mkStepper("DELAY AKSI (dtk)", function() return delayAfter end, function(v) delayAfter = v end, 0.05, 5, 0.05)
 	section("GUI GAME")
 	mkPair("BUKA JOB GUI", C(70, 110, 200), function() openGui("JobGui") end, "TUTUP JOB GUI", C(190, 80, 90), function() closeGui("JobGui") end)
+
+	-- CODES: redeem semua code lewat ReplicatedStorage.CodesSystem.RedeemCode
+	local CODES = {
+		"ACEWHEELIE",
+		"FEYYOWBAU",
+		"NOPALMASUKANGIN",
+		"SORRYDELAYDIKIT",
+		"OTW500RBVISIT",
+		"HALLOWEN",
+		"MASSIVEUPDATE",
+		"SECRET",
+		"HIREZSUPERNOPAL",
+	}
+	local redeeming = false
+	mkFolder("CODES", false)
+	mkWide("REDEEM ALL CODES", C(60, 150, 90), function()
+		if redeeming then return end
+		redeeming = true
+		task.spawn(function()
+			local rs = game:GetService("ReplicatedStorage")
+			local sys = rs:WaitForChild("CodesSystem", 5)
+			local ev = sys and sys:WaitForChild("RedeemCode", 5)
+			if not ev then
+				st.Text = "Codes: remote RedeemCode tidak ketemu"
+				redeeming = false
+				return
+			end
+			for i, code in ipairs(CODES) do
+				st.Text = "Codes " .. i .. "/" .. #CODES .. ": " .. code
+				pcall(function() ev:FireServer(code) end)
+				task.wait(0.7)
+			end
+			st.Text = "Codes: " .. #CODES .. " code dikirim"
+			redeeming = false
+		end)
+	end)
 
 	currentFolder = nil
 	mkWide("STOP SEMUA", C(170, 60, 60), stopAll)
