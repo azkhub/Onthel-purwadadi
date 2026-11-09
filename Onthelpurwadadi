@@ -1,5 +1,5 @@
 -- KERJA HUB LITE (TANPA mini game) | Onthel Purwadadi | By Azk & Claude
--- Isi: duit live, auto kurir, TP gerobak, auto layani bakso, CLAIM MEME (manual + auto claim all), MiniGame Hub (execute/salin),
+-- Isi: duit live, auto kurir, TP gerobak, auto layani bakso, AUTO CLAIM ALL MEME (satu tombol, cepat + stabil), MiniGame Hub (execute/salin),
 --      ANTI GAMEPLAY PAUSED, buka/tutup JobGui, delay bisa diatur
 -- Tombol buka/tutup bulat berlogo (bisa digeser), window bisa digeser, animasi buka/tutup, GUI tahan hilang
 -- TARUH DI: StarterPlayer > StarterPlayerScripts (LocalScript) atau jalankan lewat executor
@@ -248,7 +248,6 @@ local function startKerjaHub()
 	local kurirOn, baksoOn = false, false
 	local antiPause = true
 	local kurirRun = 0
-	local memeAllOn, memeAllRun, memeDelay = false, 0, 1
 	local pauseJobs = false -- true saat klaim meme (job lain menunggu sebentar)
 	local delayTP, delayAfter = 0.25, 0.2
 	local lastServe = 0
@@ -669,113 +668,136 @@ local function startKerjaHub()
 	------------------------------------------------------------
 	-- BANTU: kunjungi prompt (dipakai claim meme)
 	------------------------------------------------------------
-	-- kunjungi semua ProximityPrompt di dalam sebuah objek (TP ke objek, pindah kalau promptnya jauh)
-	local function visitPrompts(container)
+	-- kunjungi prompt cepat: TP sekali, fire 2-3x, jeda pendek
+	local function visitPrompts(container, dTP, dAfter)
+		dTP, dAfter = dTP or 0.12, dAfter or 0.05
 		if not container then return 0 end
 		local list = {}
 		if container:IsA("ProximityPrompt") then list[1] = container end
 		for _, d in ipairs(container:GetDescendants()) do
-			if d:IsA("ProximityPrompt") and d.Enabled then list[#list + 1] = d end
+			if d:IsA("ProximityPrompt") then list[#list + 1] = d end
 		end
 		local base = posOf(container)
-		local cur = base
 		if base then
 			tp(base, true)
-			task.wait(delayTP)
+			task.wait(dTP)
 		end
 		local n = 0
 		for _, p in ipairs(list) do
 			local pp = posOf(p.Parent)
-			if pp and (not cur or (pp - cur).Magnitude > 15) then
+			if pp and base and (pp - base).Magnitude > 20 then
 				tp(pp, true)
-				cur = pp
-				task.wait(delayTP)
+				task.wait(dTP)
+				base = pp
 			end
+			-- fire 2x biar stabil tanpa delay panjang
 			if firePrompt(p) then n = n + 1 end
-			task.wait(delayAfter)
+			task.wait(0.03)
+			firePrompt(p)
+			task.wait(dAfter)
 		end
 		return n
 	end
 
 	------------------------------------------------------------
-	-- CLAIM MEME (manual): TP ke meme -> pencet prompt -> TP balik ke tempat semula
+	-- AUTO CLAIM ALL MEME: satu tombol. TP ke posisi asset meme (bukan kordinat fixed), pencet prompt, jeda MEME_GAP detik antar meme,
+	-- lalu balik ke posisi semula.
 	------------------------------------------------------------
-	local function claimMeme()
-		local meme = workspace:FindFirstChild("meme baru 8")
-		if not meme then
-			st.Text = "Meme tidak ketemu"
-			return false
-		end
-		pauseJobs = true
-		task.wait(0.5) -- biar langkah job yang sedang jalan selesai dulu
-		local root = getRoot()
-		if not root then
-			pauseJobs = false
-			return false
-		end
-		local back = root.CFrame
-		st.Text = "Meme: klaim..."
-		local n = visitPrompts(meme)
-		root = getRoot()
-		if root then root.CFrame = back end
-		pauseJobs = false
-		st.Text = (n > 0) and "Meme diklaim, kembali" or "Meme: tidak ada prompt"
-		return n > 0
+	local MEME_GAP = 0.35 -- jeda antar meme (dtk) — lebih cepat
+	local MEME_ARRIVE = 0.12 -- tunggu sesudah TP
+	local MEME_AFTER = 0.05 -- jeda sesudah prompt
+		-- asset path saja (TANPA koordinat — biar ga ngebug)
+	local memeDefs = {
+		{ name = "meme upin", get = function() return workspace:FindFirstChild("meme upin") end },
+		{ name = "meme 1", get = function()
+			local f = workspace:FindFirstChild("meme")
+			return f and f:FindFirstChild("meme 1")
+		end },
+		{ name = "meme 2", get = function()
+			local f = workspace:FindFirstChild("meme")
+			return f and f:FindFirstChild("meme 2")
+		end },
+		{ name = "meme 3", get = function()
+			local f = workspace:FindFirstChild("meme")
+			return f and f:FindFirstChild("meme 3")
+		end },
+		{ name = "meme baru 8", get = function() return workspace:FindFirstChild("meme baru 8") end },
+	}
+
+
+	local function hasPrompt(o)
+		return o:IsA("ProximityPrompt") or o:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
 	end
 
-	------------------------------------------------------------
-	-- AUTO CLAIM ALL MEME: meme upin + meme 1/2/3, jeda memeDelay antar meme
-	------------------------------------------------------------
-	local function memeTargets()
-		local list = {}
-		local upin = workspace:FindFirstChild("meme upin")
-		if upin then list[#list + 1] = upin end
-		local folder = workspace:FindFirstChild("meme")
-		if folder then
-			for _, nm in ipairs({"meme 1", "meme 2", "meme 3"}) do
-				local m = folder:FindFirstChild(nm)
-				if m then list[#list + 1] = m end
+	-- hasil: true/false — TP dari posisi ASSET saja (tanpa Vector3 fixed)
+	local function claimDef(def)
+		local obj = def.get()
+		if not obj then
+			return false, "asset tidak ada di workspace"
+		end
+		local p = posOf(obj)
+		if not p then
+			return false, "tidak ada BasePart di meme"
+		end
+		tp(p, true)
+		task.wait(MEME_ARRIVE)
+		-- refresh object setelah stream
+		obj = def.get() or obj
+		if not hasPrompt(obj) then
+			task.wait(0.15)
+			obj = def.get() or obj
+			if not hasPrompt(obj) then
+				return false, "prompt tidak ketemu"
 			end
 		end
-		return list
+		local n = visitPrompts(obj, MEME_ARRIVE, MEME_AFTER)
+		if n == 0 then
+			task.wait(0.08)
+			n = visitPrompts(obj, 0.1, 0.04)
+		end
+		if n == 0 then return false, "prompt gagal dipencet" end
+		return true
 	end
 
-	local function toggleMemeAll()
-		memeAllOn = not memeAllOn
-		paint()
-		if not memeAllOn then return end
-		memeAllRun = memeAllRun + 1
-		local my = memeAllRun
-		task.spawn(function()
-			while memeAllOn and memeAllRun == my do
-				local targets = memeTargets()
-				if #targets == 0 then
-					st.Text = "Meme: tidak ada yang ketemu"
-					task.wait(memeDelay)
+	local claiming = false
+	local function claimAllMeme()
+		if claiming then return end
+		claiming = true
+		pauseJobs = true
+		if kurirOn or baksoOn then task.wait(0.3) end -- biar langkah job yang sedang jalan selesai dulu
+		local root = getRoot()
+		local back = root and root.CFrame
+		local done, fails = 0, {}
+		for i, def in ipairs(memeDefs) do
+			local pre = def.get()
+			if not pre or not posOf(pre) then
+				st.Text = "Skip " .. def.name .. " (belum kerender)"
+				fails[#fails + 1] = def.name .. " (belum kerender)"
+			else
+				st.Text = "Meme: klaim " .. def.name .. " (" .. i .. "/" .. #memeDefs .. ")..."
+				local okc, ok, why = pcall(claimDef, def)
+				if okc and ok then
+					done = done + 1
 				else
-					pauseJobs = true
-					task.wait(0.5) -- biar langkah job yang sedang jalan selesai dulu
-					local root = getRoot()
-					local back = root and root.CFrame
-					local done = 0
-					for _, m in ipairs(targets) do
-						if not memeAllOn or memeAllRun ~= my then break end
-						st.Text = "Meme: klaim " .. m.Name .. "..."
-						if visitPrompts(m) > 0 then done = done + 1 end
-						task.wait(memeDelay)
-					end
-					root = getRoot()
-					if root and back then root.CFrame = back end
-					pauseJobs = false
-					st.Text = "Meme: " .. done .. "/" .. #targets .. " diklaim"
-					task.wait(memeDelay)
+					fails[#fails + 1] = def.name .. " (" .. tostring(okc and why or ok) .. ")"
 				end
 			end
-			pauseJobs = false
-			if memeAllRun == my then st.Text = "Auto claim meme OFF" end
-		end)
+			if i < #memeDefs then task.wait(MEME_GAP) end
+		end
+		root = getRoot()
+		if root and back then root.CFrame = back end
+		pauseJobs = false
+		claiming = false
+		local txt = "Meme: " .. done .. "/" .. #memeDefs .. " diklaim"
+		if typeof(fireproximityprompt) ~= "function" then
+			txt = txt .. " | executor tidak punya fireproximityprompt"
+		end
+		if #fails > 0 then
+			txt = txt .. " | gagal: " .. table.concat(fails, ", ")
+			warn("[KerjaHub] " .. table.concat(fails, " ; "))
+		end
+		st.Text = txt
 	end
-
 
 	------------------------------------------------------------
 	-- ANTI GAMEPLAY PAUSED (hanya untuk mencegah game "pause" karena streaming)
@@ -837,7 +859,7 @@ local function startKerjaHub()
 	end)
 
 	local function stopAll()
-		kurirOn, baksoOn, memeAllOn = false, false, false
+		kurirOn, baksoOn = false, false
 		paint()
 		st.Text = "Semua OFF"
 	end
@@ -878,9 +900,125 @@ local function startKerjaHub()
 	mkWide("TP GEROBAK (manual)", C(60, 120, 215), tpGerobak)
 	mkSwitch("AUTO LAYANI BAKSO", function() return baksoOn end, toggleBakso)
 	section("MEME")
-	mkWide("CLAIM MEME", C(190, 120, 40), function() task.spawn(claimMeme) end)
-	mkSwitch("AUTO CLAIM ALL MEME", function() return memeAllOn end, toggleMemeAll)
-	mkStepper("DELAY CLAIM MEME (dtk)", function() return memeDelay end, function(v) memeDelay = v end, 0.1, 60, 0.1)
+	local memeNote = label(farmPage, "Note: script jalan hanya jika meme sudah kerender. Belum kerender = tidak bisa TP.", 11, UDim2.new(), UDim2.new(1, 0, 0, 36), C(255, 210, 120))
+	memeNote.LayoutOrder = nextOrd()
+	memeNote.TextWrapped = true
+	outline(memeNote)
+	reg(memeNote)
+
+	-- ESP MEME: Billboard + status kerender
+	local memeEspOn = false
+	local memeEspFolder = nil
+	local function clearMemeEsp()
+		if memeEspFolder then
+			pcall(function() memeEspFolder:Destroy() end)
+			memeEspFolder = nil
+		end
+	end
+	local function refreshMemeEsp()
+		clearMemeEsp()
+		if not memeEspOn then return end
+		local ch = lp.Character
+		local root = ch and ch:FindFirstChild("HumanoidRootPart")
+		memeEspFolder = Instance.new("Folder")
+		memeEspFolder.Name = "KerjaHubMemeESP"
+		memeEspFolder.Parent = workspace
+		for _, def in ipairs(memeDefs) do
+			local obj = def.get()
+			local rendered = obj ~= nil and posOf(obj) ~= nil
+			local part = nil
+			if rendered then
+				if obj:IsA("BasePart") then
+					part = obj
+				else
+					part = obj:FindFirstChildWhichIsA("BasePart", true)
+				end
+			end
+			-- anchor part for billboard (pakai part asli atau part sementara di posisi player+offset kalau belum render — skip jika belum ada)
+			if not part then
+				-- tampilkan status di status label saja; ESP 3D hanya kalau sudah kerender
+			else
+				local bb = Instance.new("BillboardGui")
+				bb.Name = "ESP_" .. def.name
+				bb.Size = UDim2.fromOffset(180, 44)
+				bb.AlwaysOnTop = true
+				bb.MaxDistance = 2000
+				bb.StudsOffset = Vector3.new(0, 3, 0)
+				bb.Adornee = part
+				bb.Parent = memeEspFolder
+				local bg = Instance.new("Frame")
+				bg.Size = UDim2.fromScale(1, 1)
+				bg.BackgroundColor3 = rendered and C(20, 90, 40) or C(90, 30, 30)
+				bg.BackgroundTransparency = 0.25
+				bg.BorderSizePixel = 0
+				bg.Parent = bb
+				Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 6)
+				local t1 = Instance.new("TextLabel")
+				t1.BackgroundTransparency = 1
+				t1.Size = UDim2.new(1, -6, 0, 20)
+				t1.Position = UDim2.fromOffset(3, 2)
+				t1.Font = FONT
+				t1.TextSize = 12
+				t1.TextColor3 = Color3.new(1, 1, 1)
+				t1.Text = def.name
+				t1.TextXAlignment = Enum.TextXAlignment.Left
+				t1.Parent = bg
+				new("UIStroke", { Thickness = 1.2, Color = Color3.new(0, 0, 0) }, t1)
+				local t2 = Instance.new("TextLabel")
+				t2.BackgroundTransparency = 1
+				t2.Size = UDim2.new(1, -6, 0, 18)
+				t2.Position = UDim2.fromOffset(3, 22)
+				t2.Font = FONT
+				t2.TextSize = 11
+				t2.TextColor3 = rendered and C(120, 255, 140) or C(255, 120, 120)
+				t2.Text = rendered and "KERENDER" or "BELUM KERENDER"
+				t2.TextXAlignment = Enum.TextXAlignment.Left
+				t2.Parent = bg
+				new("UIStroke", { Thickness = 1.2, Color = Color3.new(0, 0, 0) }, t2)
+				-- highlight
+				pcall(function()
+					local h = Instance.new("Highlight")
+					h.FillColor = rendered and C(60, 200, 90) or C(200, 60, 60)
+					h.OutlineColor = Color3.new(1, 1, 1)
+					h.FillTransparency = 0.7
+					h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+					h.Adornee = obj:IsA("Model") and obj or part
+					h.Parent = memeEspFolder
+				end)
+			end
+		end
+		-- status ringkas di st
+		local okn, badn = 0, 0
+		for _, def in ipairs(memeDefs) do
+			local o = def.get()
+			if o and posOf(o) then okn = okn + 1 else badn = badn + 1 end
+		end
+		st.Text = string.format("ESP Meme: %d kerender, %d belum", okn, badn)
+	end
+	local function toggleMemeEsp()
+		memeEspOn = not memeEspOn
+		if memeEspOn then
+			refreshMemeEsp()
+		else
+			clearMemeEsp()
+			st.Text = "ESP Meme OFF"
+		end
+		paint()
+	end
+	mkSwitch("ESP MEME", function() return memeEspOn end, toggleMemeEsp)
+	mkWide("REFRESH ESP MEME", C(70, 130, 200), function()
+		if memeEspOn then refreshMemeEsp() else st.Text = "Nyalakan ESP MEME dulu" end
+	end)
+	mkWide("AUTO CLAIM ALL MEME", C(190, 120, 40), function() task.spawn(claimAllMeme) end)
+	-- loop refresh ESP tiap 2 dtk
+	task.spawn(function()
+		while true do
+			task.wait(2)
+			if memeEspOn then
+				pcall(refreshMemeEsp)
+			end
+		end
+	end)
 	section("ANTI PAUSE")
 	mkSwitch("ANTI GAMEPLAY PAUSED", function() return antiPause end, toggleAnti)
 	section("PENGATURAN")
