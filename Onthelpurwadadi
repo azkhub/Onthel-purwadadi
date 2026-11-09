@@ -601,6 +601,56 @@ local function startKerjaHub()
 		task.wait(delayAfter)
 	end
 
+	-- baca rumah tujuan dari TutorialBeam label
+	-- nil = belum ada rumah (masih di tahap kantor / ambil paket)
+	local function getBeamHouseName()
+		local beam = workspace:FindFirstChild("TutorialBeam")
+		local light = beam and beam:FindFirstChild("LightBeam")
+		local label = light and light:FindFirstChild("BeamLabel")
+		local frame = label and label:FindFirstChild("Frame")
+		local tl = frame and frame:FindFirstChild("TextLabel")
+		if not tl and beam then
+			for _, d in ipairs(beam:GetDescendants()) do
+				if d:IsA("TextLabel") then
+					local tx = string.lower(tostring(d.Text or ""))
+					if tx ~= "" then tl = d break end
+				end
+			end
+		end
+		if not tl then return nil end
+		local t = tostring(tl.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+		if t == "" then return nil end
+		local low = string.lower(t)
+		-- teks kantor / ambil paket → bukan rumah
+		if string.find(low, "kantor", 1, true)
+			or string.find(low, "kurir", 1, true)
+			or string.find(low, "paket", 1, true)
+			or string.find(low, "ambil", 1, true)
+			or string.find(low, "office", 1, true) then
+			return nil
+		end
+		-- hanya terima nama rumah yang valid
+		for _, name in ipairs(houses) do
+			if t == name or string.find(low, string.lower(name), 1, true) then
+				return name
+			end
+		end
+		local job = workspace:FindFirstChild("JobLocations")
+		local points = job and job:FindFirstChild("DeliveryPoints")
+		if points then
+			local direct = points:FindFirstChild(t)
+			if direct then return t end
+			for _, ch in ipairs(points:GetChildren()) do
+				if string.find(low, string.lower(ch.Name), 1, true)
+					or string.find(string.lower(ch.Name), low, 1, true) then
+					return ch.Name
+				end
+			end
+		end
+		-- teks tidak dikenali sebagai rumah → anggap masih tahap kantor
+		return nil
+	end
+
 	local function toggleKurir()
 		kurirOn = not kurirOn
 		if kurirOn then baksoOn = false end
@@ -608,16 +658,32 @@ local function startKerjaHub()
 		if not kurirOn then return end
 		kurirRun = kurirRun + 1
 		local my = kurirRun
+		local lastHouse = nil
 		task.spawn(function()
 			while kurirOn and kurirRun == my do
-				goOffice()
-				if not kurirOn or kurirRun ~= my then break end
-				for _, name in ipairs(houses) do
-					if not kurirOn or kurirRun ~= my then break end
-					goHouse(name)
+				local houseName = getBeamHouseName()
+				if houseName then
+					-- sudah ada rumah di label → antar
+					if houseName ~= lastHouse then
+						st.Text = "Beam: " .. houseName
+						goHouse(houseName)
+						lastHouse = houseName
+					else
+						local job = workspace:FindFirstChild("JobLocations")
+						local points = job and job:FindFirstChild("DeliveryPoints")
+						local house = points and points:FindFirstChild(houseName)
+						local door = house and house:FindFirstChild("Door")
+						fireOnce(door or house)
+						task.wait(0.35)
+					end
+				else
+					-- belum ada rumah (beam di kantor / label kosong) → WAJIB ke kantor ambil paket
+					lastHouse = nil
+					st.Text = "Ambil paket → Kantor Kurir"
+					goOffice()
+					task.wait(0.35)
 				end
-				st.Text = "Kurir: ulang..."
-				task.wait(0.15)
+				task.wait(0.12)
 			end
 			if kurirRun == my then st.Text = "Kurir OFF" end
 		end)
