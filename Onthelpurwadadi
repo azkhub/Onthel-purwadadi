@@ -1,5 +1,5 @@
 -- KERJA HUB LITE (TANPA mini game) | Onthel Purwadadi | By Azk & Claude
--- Isi: duit live, auto kurir, TP gerobak, auto layani bakso, AUTO CLAIM ALL MEME (satu tombol, cepat + stabil), MiniGame Hub (execute/salin),
+-- Isi: duit live, auto kurir, RACE (bike speed, maks 199), TP gerobak, auto layani bakso, AUTO CLAIM ALL MEME (satu tombol, cepat + stabil), MiniGame Hub (execute/salin),
 --      ANTI GAMEPLAY PAUSED, buka/tutup JobGui, delay bisa diatur
 -- Tombol buka/tutup bulat berlogo (bisa digeser), window bisa digeser, animasi buka/tutup, GUI tahan hilang
 -- TARUH DI: StarterPlayer > StarterPlayerScripts (LocalScript) atau jalankan lewat executor
@@ -434,7 +434,8 @@ local function startKerjaHub()
 	end
 
 	-- pengatur angka (tombol - / + atau ketik)
-	local function mkStepper(text, getFn, setFn, lo, hi, step)
+	local function mkStepper(text, getFn, setFn, lo, hi, step, fmt)
+		fmt = fmt or "%.2f"
 		local row = new("Frame", {
 			Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C(14, 34, 80), BackgroundTransparency = 0.1,
 			BorderSizePixel = 0, LayoutOrder = nextOrd(),
@@ -447,14 +448,14 @@ local function startKerjaHub()
 		local plus = mkBtn(row, "+", UDim2.new(1, -34, 0.5, -12), UDim2.fromOffset(28, 24), C(60, 100, 190))
 		local box = new("TextBox", {
 			Position = UDim2.new(1, -100, 0.5, -12), Size = UDim2.fromOffset(62, 24), BackgroundColor3 = C(8, 22, 62), BorderSizePixel = 0,
-			Text = string.format("%.2f", getFn()), Font = FONT, TextSize = 14, TextColor3 = C(255, 225, 90), ClearTextOnFocus = false,
+			Text = string.format(fmt, getFn()), Font = FONT, TextSize = 14, TextColor3 = C(255, 225, 90), ClearTextOnFocus = false,
 			PlaceholderText = "dtk", PlaceholderColor3 = C(130, 150, 190),
 		}, row)
 		accent(box, 1)
 		local function apply(v)
 			v = math.clamp(math.floor(v * 100 + 0.5) / 100, lo, hi)
 			setFn(v)
-			box.Text = string.format("%.2f", v)
+			box.Text = string.format(fmt, v)
 		end
 		minus.Activated:Connect(function() apply(getFn() - step) end)
 		plus.Activated:Connect(function() apply(getFn() + step) end)
@@ -602,53 +603,46 @@ local function startKerjaHub()
 	end
 
 	-- baca rumah tujuan dari TutorialBeam label
-	-- nil = belum ada rumah (masih di tahap kantor / ambil paket)
 	local function getBeamHouseName()
 		local beam = workspace:FindFirstChild("TutorialBeam")
 		local light = beam and beam:FindFirstChild("LightBeam")
 		local label = light and light:FindFirstChild("BeamLabel")
 		local frame = label and label:FindFirstChild("Frame")
 		local tl = frame and frame:FindFirstChild("TextLabel")
-		if not tl and beam then
-			for _, d in ipairs(beam:GetDescendants()) do
-				if d:IsA("TextLabel") then
-					local tx = string.lower(tostring(d.Text or ""))
-					if tx ~= "" then tl = d break end
+		if not tl then
+			-- fallback cari TextLabel di dalam TutorialBeam
+			if beam then
+				for _, d in ipairs(beam:GetDescendants()) do
+					if d:IsA("TextLabel") and d.Name == "TextLabel" then
+						tl = d
+						break
+					end
 				end
 			end
 		end
 		if not tl then return nil end
 		local t = tostring(tl.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
 		if t == "" then return nil end
-		local low = string.lower(t)
-		-- teks kantor / ambil paket → bukan rumah
-		if string.find(low, "kantor", 1, true)
-			or string.find(low, "kurir", 1, true)
-			or string.find(low, "paket", 1, true)
-			or string.find(low, "ambil", 1, true)
-			or string.find(low, "office", 1, true) then
-			return nil
-		end
-		-- hanya terima nama rumah yang valid
+		-- cocokkan dengan nama rumah yang dikenal
 		for _, name in ipairs(houses) do
-			if t == name or string.find(low, string.lower(name), 1, true) then
+			if t == name or string.find(string.lower(t), string.lower(name), 1, true) then
 				return name
 			end
 		end
+		-- kalau teks langsung nama folder di DeliveryPoints
 		local job = workspace:FindFirstChild("JobLocations")
 		local points = job and job:FindFirstChild("DeliveryPoints")
 		if points then
 			local direct = points:FindFirstChild(t)
 			if direct then return t end
 			for _, ch in ipairs(points:GetChildren()) do
-				if string.find(low, string.lower(ch.Name), 1, true)
-					or string.find(string.lower(ch.Name), low, 1, true) then
+				if string.find(string.lower(t), string.lower(ch.Name), 1, true)
+					or string.find(string.lower(ch.Name), string.lower(t), 1, true) then
 					return ch.Name
 				end
 			end
 		end
-		-- teks tidak dikenali sebagai rumah → anggap masih tahap kantor
-		return nil
+		return t -- coba pakai teks mentah
 	end
 
 	local function toggleKurir()
@@ -663,27 +657,27 @@ local function startKerjaHub()
 			while kurirOn and kurirRun == my do
 				local houseName = getBeamHouseName()
 				if houseName then
-					-- sudah ada rumah di label → antar
 					if houseName ~= lastHouse then
 						st.Text = "Beam: " .. houseName
 						goHouse(houseName)
 						lastHouse = houseName
 					else
+						-- masih rumah yang sama, coba prompt lagi sekali lalu tunggu ganti
 						local job = workspace:FindFirstChild("JobLocations")
 						local points = job and job:FindFirstChild("DeliveryPoints")
 						local house = points and points:FindFirstChild(houseName)
 						local door = house and house:FindFirstChild("Door")
 						fireOnce(door or house)
-						task.wait(0.35)
+						task.wait(0.4)
 					end
 				else
-					-- belum ada rumah (beam di kantor / label kosong) → WAJIB ke kantor ambil paket
+					-- tidak ada tulisan beam → ambil paket di kantor
 					lastHouse = nil
-					st.Text = "Ambil paket → Kantor Kurir"
+					st.Text = "Tidak ada beam → Kantor"
 					goOffice()
-					task.wait(0.35)
+					task.wait(0.3)
 				end
-				task.wait(0.12)
+				task.wait(0.15)
 			end
 			if kurirRun == my then st.Text = "Kurir OFF" end
 		end)
@@ -924,8 +918,153 @@ local function startKerjaHub()
 		end
 	end)
 
+	------------------------------------------------------------
+	-- RACE: BIKE SPEED (LinearVelocity, 2 mode). Batas maksimal 199 km/jam
+	-- (jangan 200+ biar tidak kena banned)
+	------------------------------------------------------------
+	local BIKE_MAX = 199
+	local bikeOn, bikeMode, bikeKmh = false, "smooth", 120 -- mode: smooth | instant
+	local bikeConn, bikeLV, bikeAtt = nil, nil, nil
+	local bikeTarget = 0 -- target studs untuk mode lereng
+	local bikeSt = nil -- label status di folder RACE (diisi saat susun tampilan)
+
+	local function mkNote(text, color, height)
+		local l = label(farmPage, text, 11, UDim2.new(), UDim2.new(1, 0, 0, height or 30), color or C(180, 190, 210))
+		l.LayoutOrder = nextOrd()
+		reg(l)
+		return l
+	end
+
+	local function bikeClear()
+		if bikeLV then pcall(function() bikeLV:Destroy() end) bikeLV = nil end
+		if bikeAtt then pcall(function() bikeAtt:Destroy() end) bikeAtt = nil end
+	end
+
+	local function bikeCtx()
+		local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+		if not hum or not hum.SeatPart then return nil end
+		local model = hum.SeatPart:FindFirstAncestorOfClass("Model")
+		while model and not model:FindFirstChild("BikeScript") do
+			local p = model.Parent
+			model = p and p:FindFirstAncestorOfClass("Model") or nil
+		end
+		if not model then return nil end
+		local bikeScript = model:FindFirstChild("BikeScript")
+		local seat = model:FindFirstChild("VehicleSeat", true) or hum.SeatPart
+		local values = bikeScript and bikeScript:FindFirstChild("Values")
+		local settingsTbl
+		local mod = bikeScript and bikeScript:FindFirstChild("BikeSettings")
+		if mod then pcall(function() settingsTbl = require(mod) end) end
+		local part = seat:IsA("BasePart") and seat or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+		return { seat = seat, settings = settingsTbl, velocity = values and values:FindFirstChild("Velocity"), part = part, model = model }
+	end
+
+	local function bikeEnsureLV(part)
+		if bikeLV and bikeLV.Parent == part then return bikeLV end
+		bikeClear()
+		bikeAtt = Instance.new("Attachment")
+		bikeAtt.Name = "SpeedBoostAtt"
+		bikeAtt.Parent = part
+		bikeLV = Instance.new("LinearVelocity")
+		bikeLV.Name = "SpeedBoostLV"
+		bikeLV.Attachment0 = bikeAtt
+		bikeLV.RelativeTo = Enum.ActuatorRelativeTo.World
+		bikeLV.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+		bikeLV.ForceLimitsEnabled = true
+		bikeLV.MaxForce = 0 -- default off
+		bikeLV.VectorVelocity = Vector3.zero
+		bikeLV.Parent = part
+		return bikeLV
+	end
+
+	local lastBikeText = 0
+	local function bikeSay(txt)
+		if bikeSt and tick() - lastBikeText > 0.25 then
+			lastBikeText = tick()
+			bikeSt.Text = txt
+		end
+	end
+
+	local function bikeApply(kmh)
+		kmh = math.min(kmh, BIKE_MAX) -- jaga batas maksimal
+		local ctx = bikeCtx()
+		if not ctx or not ctx.part then
+			bikeClear()
+			bikeSay("Naik motor dulu")
+			return
+		end
+
+		if ctx.settings and type(ctx.settings) == "table" then
+			ctx.settings.MaxSpeed = math.max(kmh, 400)
+		end
+
+		local throttle = 0
+		if ctx.seat then
+			throttle = tonumber(ctx.seat.ThrottleFloat) or tonumber(ctx.seat.Throttle) or 0
+		end
+		if throttle <= 0 and UIS:IsKeyDown(Enum.KeyCode.W) then throttle = 1 end
+
+		local part = ctx.part
+		local upright = part.CFrame.UpVector.Y > 0.3
+		local lv = bikeEnsureLV(part)
+		local need = kmh * 1.1 -- km/jam -> studs/dtk
+
+		if throttle > 0.05 and upright then
+			local look = part.CFrame.LookVector
+			local flat = Vector3.new(look.X, 0, look.Z)
+			if flat.Magnitude < 0.05 then
+				lv.MaxForce = 0
+				return
+			end
+			flat = flat.Unit
+
+			if bikeMode == "instant" then
+				bikeTarget = need
+			elseif bikeTarget < need then
+				bikeTarget = math.min(need, bikeTarget + need * 0.03 + 0.8) -- naik pelan ke need
+			else
+				bikeTarget = need
+			end
+
+			-- force sedang: cukup dorong, tidak gila (kurangi jungkir + macet)
+			lv.MaxForce = bikeMode == "instant" and 35000 or 18000
+			local v = part.AssemblyLinearVelocity
+			-- jaga Y alami (jangan angkat/tekan)
+			lv.VectorVelocity = Vector3.new(flat.X * bikeTarget, v.Y, flat.Z * bikeTarget)
+		else
+			-- lepas gas: matikan boost, biar motor ngerem natural
+			lv.MaxForce = 0
+			lv.VectorVelocity = Vector3.zero
+			bikeTarget = math.max(0, bikeTarget * 0.92)
+		end
+
+		local hud = ctx.velocity and tonumber(ctx.velocity.Value) or 0
+		bikeSay(string.format("[%s] %d | HUD %.0f | gas=%s", bikeMode == "smooth" and "LERENG" or "LANGSUNG", kmh, hud, throttle > 0 and "ON" or "off"))
+	end
+
+	local function bikeStop()
+		bikeOn = false
+		if bikeConn then bikeConn:Disconnect() bikeConn = nil end
+		bikeClear()
+		bikeTarget = 0
+		if bikeSt then bikeSt.Text = "Speed OFF" end
+	end
+
+	local function toggleBike()
+		if bikeOn then
+			bikeStop()
+		else
+			bikeOn = true
+			bikeConn = RunService.Heartbeat:Connect(function()
+				bikeApply(bikeKmh)
+			end)
+		end
+		paint()
+	end
+
 	local function stopAll()
 		kurirOn, baksoOn = false, false
+		bikeStop()
 		paint()
 		st.Text = "Semua OFF"
 	end
@@ -1128,6 +1267,26 @@ local function startKerjaHub()
 			redeeming = false
 		end)
 	end)
+
+	-- RACE (paling bawah, di bawah semua folder lain)
+	mkFolder("RACE", false)
+	mkSwitch("BIKE SPEED", function() return bikeOn end, toggleBike)
+	mkStepper("SPEED (km/jam)", function() return bikeKmh end, function(v) bikeKmh = v end, 10, BIKE_MAX, 5, "%.0f")
+	local bikeModeBtn
+	bikeModeBtn = mkWide("MODE: LERENG (naik pelan)", C(70, 130, 200), function()
+		if bikeMode == "smooth" then
+			bikeMode = "instant"
+			bikeModeBtn.Text = "MODE: LANGSUNG (full)"
+			bikeModeBtn.BackgroundColor3 = C(200, 100, 50)
+		else
+			bikeMode = "smooth"
+			bikeModeBtn.Text = "MODE: LERENG (naik pelan)"
+			bikeModeBtn.BackgroundColor3 = C(70, 130, 200)
+		end
+	end)
+	bikeSt = mkNote("Speed OFF", C(160, 200, 160), 16)
+	mkNote("NOTE: jangan pakai speed 200+ biar tidak kena banned (batas maksimal di sini 199).", C(255, 170, 80), 32)
+	mkNote("LinearVelocity = lebih mulus. Boost saat gas. Lepas gas = stop boost.", C(180, 190, 210), 32)
 
 	currentFolder = nil
 	mkWide("STOP SEMUA", C(170, 60, 60), stopAll)
