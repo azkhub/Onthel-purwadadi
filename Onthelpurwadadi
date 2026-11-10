@@ -926,6 +926,7 @@ local function startKerjaHub()
 	local bikeOn, bikeMode, bikeKmh = false, "smooth", 120 -- mode: smooth | instant
 	local bikeConn, bikeLV, bikeAtt = nil, nil, nil
 	local bikeTarget = 0 -- target studs untuk mode lereng
+	local bikeCut, bikeAvg, bikeDrop = 0, 0, 0 -- boost mati sampai bikeCut; rata-rata speed; hitungan frame anjlok
 	local bikeSt = nil -- label status di folder RACE (diisi saat susun tampilan)
 
 	local function mkNote(text, color, height)
@@ -969,10 +970,11 @@ local function startKerjaHub()
 		bikeLV.Name = "SpeedBoostLV"
 		bikeLV.Attachment0 = bikeAtt
 		bikeLV.RelativeTo = Enum.ActuatorRelativeTo.World
-		bikeLV.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+		bikeLV.VelocityConstraintMode = Enum.VelocityConstraintMode.Line
+		bikeLV.LineDirection = Vector3.new(1, 0, 0)
 		bikeLV.ForceLimitsEnabled = true
 		bikeLV.MaxForce = 0 -- default off
-		bikeLV.VectorVelocity = Vector3.zero
+		bikeLV.LineVelocity = 0
 		bikeLV.Parent = part
 		return bikeLV
 	end
@@ -1009,14 +1011,30 @@ local function startKerjaHub()
 		local lv = bikeEnsureLV(part)
 		local need = kmh * 1.1 -- km/jam -> studs/dtk
 
-		if throttle > 0.05 and upright then
-			local look = part.CFrame.LookVector
-			local flat = Vector3.new(look.X, 0, look.Z)
-			if flat.Magnitude < 0.05 then
+		local look = part.CFrame.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		local hasFlat = flat.Magnitude >= 0.05
+		if hasFlat then flat = flat.Unit end
+		local v = part.AssemblyLinearVelocity
+		local fwd = hasFlat and (v.X * flat.X + v.Z * flat.Z) or 0 -- kecepatan searah jalan
+
+		if throttle > 0.05 and upright and hasFlat and tick() >= bikeCut then
+			-- tabrakan beneran = speed anjlok tajam dan bertahan beberapa frame (bukan cuma goyang/miring)
+			if bikeAvg > 25 and fwd < bikeAvg * 0.4 then
+				bikeDrop = bikeDrop + 1
+			else
+				bikeDrop = 0
+			end
+			if bikeDrop >= 3 or v.Y > 45 then
+				bikeCut = tick() + 0.5
+				bikeTarget = math.max(0, fwd)
+				bikeAvg, bikeDrop = 0, 0
 				lv.MaxForce = 0
+				lv.LineVelocity = 0
+				bikeSay("Tabrakan: boost mati sebentar")
 				return
 			end
-			flat = flat.Unit
+			bikeAvg = bikeAvg * 0.9 + fwd * 0.1
 
 			if bikeMode == "instant" then
 				bikeTarget = need
@@ -1026,16 +1044,21 @@ local function startKerjaHub()
 				bikeTarget = need
 			end
 
-			-- force sedang: cukup dorong, tidak gila (kurangi jungkir + macet)
+			-- dorong hanya searah jalan (sumbu atas/bawah dibiarkan natural)
 			lv.MaxForce = bikeMode == "instant" and 35000 or 18000
-			local v = part.AssemblyLinearVelocity
-			-- jaga Y alami (jangan angkat/tekan)
-			lv.VectorVelocity = Vector3.new(flat.X * bikeTarget, v.Y, flat.Z * bikeTarget)
+			lv.LineDirection = flat
+			lv.LineVelocity = bikeTarget
 		else
-			-- lepas gas: matikan boost, biar motor ngerem natural
+			-- lepas gas / terbalik / habis tabrakan: matikan boost, biar motor ngerem natural
 			lv.MaxForce = 0
-			lv.VectorVelocity = Vector3.zero
-			bikeTarget = math.max(0, bikeTarget * 0.92)
+			lv.LineVelocity = 0
+			if tick() < bikeCut then
+				bikeTarget = math.max(0, fwd) -- lanjut dari speed sekarang, bukan dari nol
+			else
+				bikeTarget = math.max(0, bikeTarget * 0.92)
+			end
+			bikeAvg, bikeDrop = 0, 0
+			if not upright then bikeCut = math.max(bikeCut, tick() + 0.6) end
 		end
 
 		local hud = ctx.velocity and tonumber(ctx.velocity.Value) or 0
@@ -1046,7 +1069,7 @@ local function startKerjaHub()
 		bikeOn = false
 		if bikeConn then bikeConn:Disconnect() bikeConn = nil end
 		bikeClear()
-		bikeTarget = 0
+		bikeTarget, bikeCut, bikeAvg, bikeDrop = 0, 0, 0, 0
 		if bikeSt then bikeSt.Text = "Speed OFF" end
 	end
 
