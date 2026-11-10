@@ -603,46 +603,51 @@ local function startKerjaHub()
 	end
 
 	-- baca rumah tujuan dari TutorialBeam label
+	-- nil = belum ada rumah (masih tahap kantor / ambil paket)
 	local function getBeamHouseName()
 		local beam = workspace:FindFirstChild("TutorialBeam")
 		local light = beam and beam:FindFirstChild("LightBeam")
 		local label = light and light:FindFirstChild("BeamLabel")
 		local frame = label and label:FindFirstChild("Frame")
 		local tl = frame and frame:FindFirstChild("TextLabel")
-		if not tl then
-			-- fallback cari TextLabel di dalam TutorialBeam
-			if beam then
-				for _, d in ipairs(beam:GetDescendants()) do
-					if d:IsA("TextLabel") and d.Name == "TextLabel" then
-						tl = d
-						break
-					end
+		if not tl and beam then
+			for _, d in ipairs(beam:GetDescendants()) do
+				if d:IsA("TextLabel") then
+					local tx = string.lower(tostring(d.Text or ""))
+					if tx ~= "" then tl = d break end
 				end
 			end
 		end
 		if not tl then return nil end
 		local t = tostring(tl.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
 		if t == "" then return nil end
-		-- cocokkan dengan nama rumah yang dikenal
+		local low = string.lower(t)
+		-- teks kantor / ambil paket → bukan rumah
+		if string.find(low, "kantor", 1, true)
+			or string.find(low, "kurir", 1, true)
+			or string.find(low, "paket", 1, true)
+			or string.find(low, "ambil", 1, true)
+			or string.find(low, "office", 1, true) then
+			return nil
+		end
 		for _, name in ipairs(houses) do
-			if t == name or string.find(string.lower(t), string.lower(name), 1, true) then
+			if t == name or string.find(low, string.lower(name), 1, true) then
 				return name
 			end
 		end
-		-- kalau teks langsung nama folder di DeliveryPoints
 		local job = workspace:FindFirstChild("JobLocations")
 		local points = job and job:FindFirstChild("DeliveryPoints")
 		if points then
 			local direct = points:FindFirstChild(t)
 			if direct then return t end
 			for _, ch in ipairs(points:GetChildren()) do
-				if string.find(string.lower(t), string.lower(ch.Name), 1, true)
-					or string.find(string.lower(ch.Name), string.lower(t), 1, true) then
+				if string.find(low, string.lower(ch.Name), 1, true)
+					or string.find(string.lower(ch.Name), low, 1, true) then
 					return ch.Name
 				end
 			end
 		end
-		return t -- coba pakai teks mentah
+		return nil -- teks tidak dikenali = ke kantor
 	end
 
 	local function toggleKurir()
@@ -655,29 +660,33 @@ local function startKerjaHub()
 		local lastHouse = nil
 		task.spawn(function()
 			while kurirOn and kurirRun == my do
-				local houseName = getBeamHouseName()
-				if houseName then
-					if houseName ~= lastHouse then
-						st.Text = "Beam: " .. houseName
-						goHouse(houseName)
-						lastHouse = houseName
+				local okLoop, errLoop = pcall(function()
+					local houseName = getBeamHouseName()
+					if houseName then
+						if houseName ~= lastHouse then
+							st.Text = "Beam: " .. houseName
+							goHouse(houseName)
+							lastHouse = houseName
+						else
+							local job = workspace:FindFirstChild("JobLocations")
+							local points = job and job:FindFirstChild("DeliveryPoints")
+							local house = points and points:FindFirstChild(houseName)
+							local door = house and house:FindFirstChild("Door")
+							fireOnce(door or house)
+							task.wait(0.35)
+						end
 					else
-						-- masih rumah yang sama, coba prompt lagi sekali lalu tunggu ganti
-						local job = workspace:FindFirstChild("JobLocations")
-						local points = job and job:FindFirstChild("DeliveryPoints")
-						local house = points and points:FindFirstChild(houseName)
-						local door = house and house:FindFirstChild("Door")
-						fireOnce(door or house)
-						task.wait(0.4)
+						lastHouse = nil
+						st.Text = "Ambil paket → Kantor Kurir"
+						goOffice()
+						task.wait(0.35)
 					end
-				else
-					-- tidak ada tulisan beam → ambil paket di kantor
-					lastHouse = nil
-					st.Text = "Tidak ada beam → Kantor"
-					goOffice()
-					task.wait(0.3)
+				end)
+				if not okLoop then
+					st.Text = "Kurir err: " .. tostring(errLoop):sub(1, 60)
+					task.wait(0.5)
 				end
-				task.wait(0.15)
+				task.wait(0.12)
 			end
 			if kurirRun == my then st.Text = "Kurir OFF" end
 		end)
@@ -1258,14 +1267,8 @@ local function startKerjaHub()
 	-- CODES: redeem semua code lewat ReplicatedStorage.CodesSystem.RedeemCode
 	local CODES = {
 		"ACEWHEELIE",
-		"FEYYOWBAU",
-		"NOPALMASUKANGIN",
-		"SORRYDELAYDIKIT",
-		"OTW500RBVISIT",
-		"HALLOWEN",
-		"MASSIVEUPDATE",
-		"SECRET",
-		"HIREZSUPERNOPAL",
+		"HIREZ",
+		"ACEBAUKETEK",
 	}
 	local redeeming = false
 	mkFolder("CODES", false)
