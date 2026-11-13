@@ -432,6 +432,24 @@ do
 	local sendBtn = mkBtn(chatPanel, "KIRIM", UDim2.new(1, -72, 1, -42), UDim2.fromOffset(66, 36), C(40, 150, 80))
 
 	local lastId, fetching, count = 0, false, 0
+	local savedScroll = nil
+
+	-- ingat posisi scroll pas CHAT atau jendela ditutup, kembalikan pas dibuka lagi
+	-- (ScrollingFrame bisa lompat ke atas saat frame-nya disembunyikan lalu ditampilkan lagi)
+	chatPage:GetPropertyChangedSignal("Visible"):Connect(function()
+		if not chatPage.Visible then
+			savedScroll = msgs.CanvasPosition
+		elseif savedScroll then
+			task.defer(function() msgs.CanvasPosition = savedScroll end)
+		end
+	end)
+	window:GetPropertyChangedSignal("Visible"):Connect(function()
+		if not window.Visible then
+			savedScroll = msgs.CanvasPosition
+		elseif savedScroll and chatPage.Visible then
+			task.defer(function() msgs.CanvasPosition = savedScroll end)
+		end
+	end)
 
 	local TS = game:GetService("TweenService")
 	local CHAT_FONT = Enum.Font.Code
@@ -1350,7 +1368,9 @@ local function startKerjaHub()
 	local bikeOn, bikeMode, bikeKmh = false, "smooth", 120 -- mode: smooth | instant
 	local bikeConn, bikeLV, bikeAtt = nil, nil, nil
 	local bikeTarget = 0 -- target studs untuk mode lereng
-	local bikeCut, bikeAvg, bikeDrop = 0, 0, 0 -- boost mati sampai bikeCut; rata-rata speed; hitungan frame anjlok
+	local bikeCut, bikeGasAt, bikeTilt, gasWas = 0, 0, 0, false -- boost mati sampai bikeCut; waktu gas terakhir; hitungan frame miring
+	local bikeKHud, bikeKRpm, bikeSafe = 1.16, 0, true -- HUD km/jam per stud/dtk; RPM per stud/dtk; anti macet (batas RPM)
+	local bikeDiag = { gas = 0, tilt = 0, air = 0 } -- penghitung penyebab boost putus (tampil di status RACE)
 	local bikeSt = nil -- label status di folder RACE (diisi saat susun tampilan)
 
 	local function mkNote(text, color, height)
@@ -1381,7 +1401,12 @@ local function startKerjaHub()
 		local mod = bikeScript and bikeScript:FindFirstChild("BikeSettings")
 		if mod then pcall(function() settingsTbl = require(mod) end) end
 		local part = seat:IsA("BasePart") and seat or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
-		return { seat = seat, settings = settingsTbl, velocity = values and values:FindFirstChild("Velocity"), part = part, model = model }
+		return {
+			seat = seat, settings = settingsTbl, part = part, model = model,
+			velocity = values and values:FindFirstChild("Velocity"),
+			wheel = values and values:FindFirstChild("WheelVelocity"),
+			gear = values and values:FindFirstChild("Gear"),
+		}
 	end
 
 	local function bikeEnsureLV(part)
@@ -1420,21 +1445,28 @@ local function startKerjaHub()
 			return
 		end
 
-		if ctx.settings and type(ctx.settings) == "table" then
-			ctx.settings.MaxSpeed = math.max(kmh, 400)
-		end
+		local cfg = type(ctx.settings) == "table" and ctx.settings or nil
+		-- pulihkan nilai asli kalau versi lama script ini sempat mengubahnya (sebelum rejoin)
+		if cfg and (tonumber(cfg.MaxSpeed) or 0) >= 400 then cfg.MaxSpeed = 58 end
 
-		local throttle = 0
+		-- gas: Throttle (tombol gas HP / W) atau ThrottleFloat, mana saja yang aktif.
+		-- Ditahan 0.15 dtk supaya kedipan singkat (sering terjadi di HP) tidak mematikan boost.
+		local now = tick()
+		local thr = 0
 		if ctx.seat then
-			throttle = tonumber(ctx.seat.ThrottleFloat) or tonumber(ctx.seat.Throttle) or 0
+			thr = math.max(tonumber(ctx.seat.Throttle) or 0, tonumber(ctx.seat.ThrottleFloat) or 0)
 		end
-		if throttle <= 0 and UIS:IsKeyDown(Enum.KeyCode.W) then throttle = 1 end
+		if thr <= 0 and UIS:IsKeyDown(Enum.KeyCode.W) then thr = 1 end
+		if thr > 0.05 then bikeGasAt = now end
+		local gasOn = now - bikeGasAt < 0.15
+		if gasWas and not gasOn then bikeDiag.gas = bikeDiag.gas + 1 end
+		gasWas = gasOn
 
 		local part = ctx.part
-		local upright = part.CFrame.UpVector.Y > 0.3
+		-- terbalik/rebah beneran (bukan cuma miring/wheelie) selama beberapa frame
+		if part.CFrame.UpVector.Y < 0.1 then bikeTilt = bikeTilt + 1 else bikeTilt = 0 end
+		local upright = bikeTilt < 5
 		local lv = bikeEnsureLV(part)
-		local need = kmh * 1.1 -- km/jam -> studs/dtk
-
 		local look = part.CFrame.LookVector
 		local flat = Vector3.new(look.X, 0, look.Z)
 		local hasFlat = flat.Magnitude >= 0.05
@@ -1442,24 +1474,40 @@ local function startKerjaHub()
 		local v = part.AssemblyLinearVelocity
 		local fwd = hasFlat and (v.X * flat.X + v.Z * flat.Z) or 0 -- kecepatan searah jalan
 
-		if throttle > 0.05 and upright and hasFlat and tick() >= bikeCut then
-			-- tabrakan beneran = speed anjlok tajam dan bertahan beberapa frame (bukan cuma goyang/miring)
-			if bikeAvg > 25 and fwd < bikeAvg * 0.4 then
-				bikeDrop = bikeDrop + 1
-			else
-				bikeDrop = 0
-			end
-			if bikeDrop >= 3 or v.Y > 45 then
-				bikeCut = tick() + 0.5
-				bikeTarget = math.max(0, fwd)
-				bikeAvg, bikeDrop = 0, 0
-				lv.MaxForce = 0
-				lv.LineVelocity = 0
-				bikeSay("Tabrakan: boost mati sebentar")
-				return
-			end
-			bikeAvg = bikeAvg * 0.9 + fwd * 0.1
+		-- RPM dihitung persis seperti HUD game: |WheelVelocity| x MaxSpeed x |Gear_n|
+		local rpm, revLimit = 0, nil
+		if cfg then
+			revLimit = tonumber(cfg.RevLimitRPM)
+			local wv = ctx.wheel and tonumber(ctx.wheel.Value) or 0
+			local g = ctx.gear and tonumber(ctx.gear.Value)
+			local gr = g and tonumber(cfg["Gear_" .. tostring(g)]) or 1
+			rpm = math.abs(wv) * (tonumber(cfg.MaxSpeed) or 0) * math.abs(gr)
+		end
+		local hudV = ctx.velocity and tonumber(ctx.velocity.Value) or 0
 
+		-- kalibrasi otomatis dari motor yang dikendarai
+		if fwd > 20 then
+			if hudV > 0 then bikeKHud = bikeKHud * 0.95 + (hudV / fwd) * 0.05 end
+			if rpm > 0 then
+				bikeKRpm = (bikeKRpm == 0) and (rpm / fwd) or (bikeKRpm * 0.95 + (rpm / fwd) * 0.05)
+			end
+		end
+		local need = kmh / bikeKHud -- km/jam di HUD -> studs/dtk
+		local limitKmh = nil
+		if bikeSafe and revLimit and bikeKRpm > 0 then
+			-- ANTI MACET: jaga RPM di bawah rev limiter game (kalau kena limiter, tenaga dipotong berulang)
+			local safeStuds = revLimit * 0.9 / bikeKRpm
+			if need > safeStuds then need = safeStuds end
+			limitKmh = safeStuds * bikeKHud
+		end
+
+		-- terlempar ke atas (tabrakan keras): boost putus sebentar. Batas tinggi supaya ramp/bump biasa tidak kena.
+		if v.Y > 60 and now >= bikeCut then
+			bikeCut = now + 0.4
+			bikeDiag.air = bikeDiag.air + 1
+		end
+
+		if gasOn and upright and hasFlat and now >= bikeCut then
 			if bikeMode == "instant" then
 				bikeTarget = need
 			elseif bikeTarget < need then
@@ -1473,27 +1521,32 @@ local function startKerjaHub()
 			lv.LineDirection = flat
 			lv.LineVelocity = bikeTarget
 		else
-			-- lepas gas / terbalik / habis tabrakan: matikan boost, biar motor ngerem natural
+			-- lepas gas / terbalik / habis terlempar: matikan boost, biar motor ngerem natural
 			lv.MaxForce = 0
 			lv.LineVelocity = 0
-			if tick() < bikeCut then
+			if now < bikeCut then
 				bikeTarget = math.max(0, fwd) -- lanjut dari speed sekarang, bukan dari nol
 			else
 				bikeTarget = math.max(0, bikeTarget * 0.92)
 			end
-			bikeAvg, bikeDrop = 0, 0
-			if not upright then bikeCut = math.max(bikeCut, tick() + 0.6) end
+			if not upright and bikeCut < now + 0.6 then
+				bikeCut = now + 0.6
+				bikeDiag.tilt = bikeDiag.tilt + 1
+			end
 		end
 
-		local hud = ctx.velocity and tonumber(ctx.velocity.Value) or 0
-		bikeSay(string.format("[%s] %d | HUD %.0f | gas=%s", bikeMode == "smooth" and "LERENG" or "LANGSUNG", kmh, hud, throttle > 0 and "ON" or "off"))
+		bikeSay(string.format("[%s] set %d | HUD %.0f | RPM %d/%s | batas aman %s\ngas=%s | putus: lepas-gas %d, miring %d, loncat %d",
+			bikeMode == "smooth" and "LERENG" or "LANGSUNG", kmh, hudV, math.floor(rpm), revLimit and tostring(revLimit) or "?",
+			limitKmh and string.format("%.0f", limitKmh) or "-", gasOn and "ON" or "off",
+			bikeDiag.gas, bikeDiag.tilt, bikeDiag.air))
 	end
 
 	local function bikeStop()
 		bikeOn = false
 		if bikeConn then bikeConn:Disconnect() bikeConn = nil end
 		bikeClear()
-		bikeTarget, bikeCut, bikeAvg, bikeDrop = 0, 0, 0, 0
+		bikeTarget, bikeCut, bikeTilt, gasWas, bikeKRpm = 0, 0, 0, false, 0
+		bikeDiag.gas, bikeDiag.tilt, bikeDiag.air = 0, 0, 0
 		if bikeSt then bikeSt.Text = "Speed OFF" end
 	end
 
@@ -1507,6 +1560,58 @@ local function startKerjaHub()
 			end)
 		end
 		paint()
+	end
+
+	------------------------------------------------------------
+	-- DEALER: sekali klik = TP ke dealer + pencet DealerPrompt-nya.
+	-- Kalau dealer belum kerender, TP ke posisi yang pernah diingat (dekati sekali dulu).
+	------------------------------------------------------------
+	local dealerDefs = {
+		{ name = "Dealer Polygon", get = function() local d = workspace:FindFirstChild("Dealers"); return d and d:FindFirstChild("PolygonDealer") end },
+		{ name = "Dealer Custom", get = function() local d = workspace:FindFirstChild("Dealers"); return d and d:FindFirstChild("CustomDealer") end },
+	}
+	local dealerPos = {}
+	local dealerBusy = false
+	local function goDealer(def)
+		if dealerBusy then return end
+		dealerBusy = true
+		local obj = def.get()
+		local pos = obj and posOf(obj)
+		if pos then
+			dealerPos[def.name] = pos
+		else
+			pos = dealerPos[def.name]
+		end
+		if not pos then
+			st.Text = def.name .. ": belum kerender, dekati sekali dulu supaya posisinya diingat"
+			dealerBusy = false
+			return
+		end
+		if not obj or not posOf(obj) then
+			tp(pos, true) -- TP + minta server stream area dealer
+			local t = 0
+			while t < 4 do
+				obj = def.get()
+				if obj and posOf(obj) then break end
+				task.wait(0.1)
+				t = t + 0.1
+			end
+		end
+		if not obj then
+			st.Text = def.name .. ": tidak muncul walau sudah di-TP"
+			dealerBusy = false
+			return
+		end
+		-- tunggu DealerPrompt ter-load (UpperTorso.DealerPrompt)
+		local t = 0
+		while t < 3 and not obj:FindFirstChild("DealerPrompt", true) do
+			task.wait(0.1)
+			t = t + 0.1
+		end
+		st.Text = def.name .. ": TP + pencet prompt..."
+		local n = visitPrompts(obj, 0.3, 0.1) -- tetap di dealer, tidak balik (GUI dealer bisa tertutup kalau jauh)
+		st.Text = (n > 0) and (def.name .. ": prompt dipencet") or (def.name .. ": prompt tidak ketemu")
+		dealerBusy = false
 	end
 
 	local function stopAll()
@@ -1725,9 +1830,14 @@ local function startKerjaHub()
 			bikeModeBtn.BackgroundColor3 = C(70, 130, 200)
 		end
 	end)
-	bikeSt = mkNote("Speed OFF", C(160, 200, 160), 16)
+	mkSwitch("ANTI MACET (batas RPM)", function() return bikeSafe end, function() bikeSafe = not bikeSafe paint() end)
+	bikeSt = mkNote("Speed OFF", C(160, 200, 160), 30)
 	mkNote("NOTE: jangan pakai speed 200+ biar tidak kena banned (batas maksimal di sini 199).", C(255, 170, 80), 32)
+	mkNote("ANTI MACET: speed dibatasi otomatis supaya RPM tidak kena rev limiter game (7000 RPM) yang bikin tenaga putus-nyambung.", C(180, 190, 210), 44)
 	mkNote("LinearVelocity = lebih mulus. Boost saat gas. Lepas gas = stop boost.", C(180, 190, 210), 32)
+	section("DEALER")
+	mkWide("TP DEALER POLYGON", C(60, 150, 90), function() task.spawn(goDealer, dealerDefs[1]) end)
+	mkWide("TP DEALER CUSTOM", C(60, 150, 90), function() task.spawn(goDealer, dealerDefs[2]) end)
 
 	currentFolder = nil
 	mkWide("STOP SEMUA", C(170, 60, 60), stopAll)
