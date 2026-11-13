@@ -1,7 +1,7 @@
 -- KERJA HUB LITE (TANPA mini game) | Onthel Purwadadi | By Azk & Claude
 -- Isi: duit live, auto kurir, RACE (bike speed, maks 199), TP gerobak, auto layani bakso, AUTO CLAIM ALL MEME (satu tombol, cepat + stabil), MiniGame Hub (execute/salin),
 --      ANTI GAMEPLAY PAUSED, buka/tutup JobGui, delay bisa diatur
--- TAB: FARM | CHAT (tersambung ke web chat) | SETELAN (grafik super rendah)
+-- TAB: FARM | CHAT (tersambung ke web chat baru, login username+password) | SETELAN (grafik super rendah)
 -- Tombol buka/tutup bulat berlogo (bisa digeser), window bisa digeser, animasi buka/tutup, GUI tahan hilang
 -- TARUH DI: StarterPlayer > StarterPlayerScripts (LocalScript) atau jalankan lewat executor
 
@@ -276,15 +276,19 @@ end
 ------------------------------------------------------------
 do
 	local HttpService = game:GetService("HttpService")
-	local SUPABASE_URL = "https://sklktefyzieidhwreets.supabase.co"
-	local ANON_KEY = "sb_publishable_tI4yU-4lvTc7lhDj1_4fgg_Su39pYvU"
-	local SAVE_FILE = "webchat_username.txt"
+	local SUPABASE_URL = "https://gtntmadknqaslqzizvqt.supabase.co"
+	local ANON_KEY = "sb_publishable_G0A0O_OP_K2rMgRSayUKgw__csYYCvU"
+	local EMAIL_DOMAIN = "@sharescript-chat.com" -- harus sama dengan di web
+	local SAVE_FILE = "webchat_session.txt"
 
-	local function httpRequest(method, path, body)
+	local function httpRequest(method, path, body, token, extra)
+		local headers = { ["apikey"] = ANON_KEY, ["Content-Type"] = "application/json" }
+		if token then headers["Authorization"] = "Bearer " .. token end
+		if extra then for k, v in pairs(extra) do headers[k] = v end end
 		local req = {
-			Url = SUPABASE_URL .. "/rest/v1/" .. path,
+			Url = SUPABASE_URL .. path,
 			Method = method,
-			Headers = { ["apikey"] = ANON_KEY, ["Content-Type"] = "application/json" },
+			Headers = headers,
 			Body = body and HttpService:JSONEncode(body) or nil,
 		}
 		local fn = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
@@ -302,58 +306,116 @@ do
 	end
 	local function isOk(code) return code and code >= 200 and code < 300 end
 
-	-- simpan / muat akun
-	local function parseCode(str)
+	local currentUsername, accessToken, refreshToken = nil, nil, nil
+
+	-- simpan / muat sesi (password TIDAK disimpan, cuma refresh token)
+	local function saveSession()
+		if not currentUsername or not refreshToken then return end
+		local s = currentUsername .. "|" .. refreshToken
+		pcall(function() getgenv().WebChatSession = s end)
+		pcall(function() writefile(SAVE_FILE, s) end)
+	end
+	local function clearSession()
+		pcall(function() getgenv().WebChatSession = nil end)
+		pcall(function() writefile(SAVE_FILE, "") end)
+	end
+	local function parseSession(str)
 		if type(str) ~= "string" then return nil end
 		str = str:gsub("%s", "")
-		return str:match("^([a-z0-9_]+)|([%w%-]+)$")
+		return str:match("^([a-z0-9_]+)|(.+)$")
 	end
-	local function saveLogin(name, token)
-		local code = name .. "|" .. token
-		pcall(function() getgenv().WebChatLogin = code end)
-		local ok = pcall(function() writefile(SAVE_FILE, code) end)
-		if not ok then return false end
-		local ok2, back = pcall(function() return readfile(SAVE_FILE) end)
-		return ok2 and back == code
-	end
-	local function loadLogin()
+	local function loadSession()
 		local ok, data = pcall(function() return readfile(SAVE_FILE) end)
-		if ok and parseCode(data) then return parseCode(data) end
-		local ok2, g = pcall(function() return getgenv().WebChatLogin end)
-		if ok2 and parseCode(g) then return parseCode(g) end
+		if ok and parseSession(data) then return parseSession(data) end
+		local ok2, g = pcall(function() return getgenv().WebChatSession end)
+		if ok2 and parseSession(g) then return parseSession(g) end
 		return nil
+	end
+
+	local function refreshSession()
+		if not refreshToken then return false end
+		local data, code = httpRequest("POST", "/auth/v1/token?grant_type=refresh_token", { refresh_token = refreshToken })
+		if isOk(code) and type(data) == "table" and data.access_token then
+			accessToken = data.access_token
+			refreshToken = data.refresh_token or refreshToken
+			saveSession()
+			return true
+		end
+		return false
+	end
+
+	local function authenticate(mode, name, pass)
+		local email = name .. EMAIL_DOMAIN
+		local data, code
+		if mode == "reg" then
+			data, code = httpRequest("POST", "/auth/v1/signup", { email = email, password = pass, data = { username = name } })
+		else
+			data, code = httpRequest("POST", "/auth/v1/token?grant_type=password", { email = email, password = pass })
+		end
+		if isOk(code) and type(data) == "table" and data.access_token then
+			currentUsername = name
+			accessToken = data.access_token
+			refreshToken = data.refresh_token
+			saveSession()
+			return true
+		end
+		local msg = ""
+		if type(data) == "table" then
+			msg = tostring(data.msg or data.message or data.error_description or data.error or "")
+		end
+		local low = msg:lower()
+		if isOk(code) and type(data) == "table" and not data.access_token then
+			return false, "Akun dibuat tapi perlu konfirmasi email. Matikan 'Confirm email' di Supabase."
+		elseif low:find("already") or low:find("registered") or low:find("database error") then
+			return false, "@" .. name .. " sudah dipakai atau tidak valid, coba yang lain."
+		elseif low:find("invalid login") then
+			return false, "Username atau password salah."
+		elseif low:find("rate limit") then
+			return false, "Terlalu sering mencoba, tunggu sebentar."
+		elseif code == 0 then
+			return false, "Gagal terhubung. Chat butuh executor dengan HTTP."
+		end
+		return false, (msg ~= "" and msg or "Gagal") .. " (kode " .. tostring(code) .. ")"
 	end
 
 	-- panel login
 	local loginPanel = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, chatPage)
-	label(loginPanel, "Buat username (huruf kecil, angka, _ ; 3-16 karakter), atau tempel kode akun (nama|kode) untuk masuk.", 11,
-		UDim2.fromOffset(10, 8), UDim2.new(1, -20, 0, 44), C(180, 200, 255))
+	label(loginPanel, "Daftar sekali (username tidak bisa diganti) atau masuk pakai akun yang sama dengan web chat.", 11,
+		UDim2.fromOffset(10, 6), UDim2.new(1, -20, 0, 40), C(180, 200, 255))
 	local userBox = new("TextBox", {
-		Position = UDim2.fromOffset(10, 58), Size = UDim2.new(1, -20, 0, 34), BackgroundColor3 = C(8, 22, 62), BorderSizePixel = 0,
-		Text = "", PlaceholderText = "contoh: azkio_01", PlaceholderColor3 = C(130, 150, 190),
+		Position = UDim2.fromOffset(10, 50), Size = UDim2.new(1, -20, 0, 34), BackgroundColor3 = C(8, 22, 62), BorderSizePixel = 0,
+		Text = "", PlaceholderText = "username (a-z, 0-9, _ ; 3-20)", PlaceholderColor3 = C(130, 150, 190),
 		Font = FONT, TextSize = 14, TextColor3 = C(255, 225, 90), ClearTextOnFocus = false,
 	}, loginPanel)
 	accent(userBox, 1)
-	local createBtn = mkBtn(loginPanel, "BUAT & MASUK", UDim2.fromOffset(10, 100), UDim2.new(1, -20, 0, 36), C(40, 150, 80))
-	local loginSt = label(loginPanel, "", 11, UDim2.fromOffset(10, 142), UDim2.new(1, -20, 0, 70), C(255, 120, 120))
+	local passBox = new("TextBox", {
+		Position = UDim2.fromOffset(10, 90), Size = UDim2.new(1, -20, 0, 34), BackgroundColor3 = C(8, 22, 62), BorderSizePixel = 0,
+		Text = "", PlaceholderText = "password (min 6)", PlaceholderColor3 = C(130, 150, 190),
+		Font = FONT, TextSize = 14, TextColor3 = Color3.new(1, 1, 1), ClearTextOnFocus = false,
+	}, loginPanel)
+	accent(passBox, 1)
+	local regBtn = mkBtn(loginPanel, "DAFTAR", UDim2.fromOffset(10, 132), UDim2.new(0.5, -15, 0, 36), C(40, 150, 80))
+	local logBtn = mkBtn(loginPanel, "MASUK", UDim2.new(0.5, 5, 0, 132), UDim2.new(0.5, -15, 0, 36), C(45, 110, 220))
+	local loginSt = label(loginPanel, "", 11, UDim2.fromOffset(10, 176), UDim2.new(1, -20, 0, 70), C(255, 120, 120))
 
 	do
 		local okW = pcall(function() writefile("webchat_test.txt", "ok") end)
 		local okR, v = pcall(function() return readfile("webchat_test.txt") end)
 		if okW and okR and v == "ok" then
 			loginSt.TextColor3 = C(120, 220, 150)
-			loginSt.Text = "Penyimpanan file: OK (akun tersimpan otomatis)"
+			loginSt.Text = "Penyimpanan file: OK (login tersimpan otomatis)"
 		else
 			loginSt.TextColor3 = C(255, 200, 50)
-			loginSt.Text = "Penyimpanan file tidak didukung. Kode akun disalin ke clipboard, simpan di Catatan."
+			loginSt.Text = "Penyimpanan file tidak didukung, kamu harus masuk lagi tiap kali."
 		end
 	end
 
 	-- panel chat
 	local chatPanel = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, chatPage)
-	local chatSt = label(chatPanel, "", 11, UDim2.fromOffset(8, 3), UDim2.new(1, -16, 0, 14), C(120, 255, 150))
+	local chatSt = label(chatPanel, "", 11, UDim2.fromOffset(8, 3), UDim2.new(1, -76, 0, 14), C(120, 255, 150))
+	local logoutBtn = mkBtn(chatPanel, "KELUAR", UDim2.new(1, -66, 0, 1), UDim2.fromOffset(60, 18), C(150, 50, 50))
 	local msgs = new("ScrollingFrame", {
-		Position = UDim2.fromOffset(6, 20), Size = UDim2.new(1, -12, 1, -68), BackgroundColor3 = C(8, 22, 62),
+		Position = UDim2.fromOffset(6, 22), Size = UDim2.new(1, -12, 1, -70), BackgroundColor3 = C(8, 22, 62),
 		BackgroundTransparency = 0.2, BorderSizePixel = 0, ScrollBarThickness = 4,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
 	}, chatPanel)
@@ -369,15 +431,22 @@ do
 	accent(inputBox, 1)
 	local sendBtn = mkBtn(chatPanel, "KIRIM", UDim2.new(1, -72, 1, -42), UDim2.fromOffset(66, 36), C(40, 150, 80))
 
-	local currentUsername, currentToken = nil, nil
 	local lastId, fetching, count = 0, false, 0
 
-	local function addMessage(m)
+	local TS = game:GetService("TweenService")
+	local CHAT_FONT = Enum.Font.Code
+
+	local function addMessage(m, animate)
 		count = count + 1
-		local fromGame = (m.source == "roblox")
-		local mine = fromGame and m.name == currentUsername
+		local mine = (m.username == currentUsername)
+		local isGame = (m.source == "game")
 		local w = math.max(160, window.Size.X.Offset - 24)
-		local maxW = math.floor(w * 0.72) - 20
+		local maxW = math.floor(w * 0.70) - 34
+
+		local fill = mine and C(190, 225, 255) or C(255, 255, 255)
+		local shade = mine and C(125, 165, 235) or C(196, 196, 246)
+		local nameCol = mine and C(25, 70, 160) or C(95, 60, 180)
+		local ink = Color3.new(0, 0, 0)
 
 		local row = new("Frame", {
 			LayoutOrder = count, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
@@ -386,33 +455,64 @@ do
 			HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left,
 		}, row)
 
-		local bubble = new("Frame", {
-			Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY, BorderSizePixel = 0,
-			BackgroundColor3 = mine and C(45, 130, 255) or C(24, 52, 120),
-		}, row)
-		new("UICorner", { CornerRadius = UDim.new(0, 10) }, bubble)
+		-- pembungkus: [ekor][kotak] untuk orang lain, [kotak][ekor] untuk kita
+		local wrap = new("Frame", { Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1 }, row)
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}, wrap)
+		new("UIPadding", { PaddingBottom = UDim.new(0, 2) }, wrap)
+
+		-- ekor lancip di samping (diamond pixel, di belakang kotak)
+		local tailHolder = new("Frame", {
+			LayoutOrder = mine and 2 or 1, Size = UDim2.fromOffset(9, 22), BackgroundTransparency = 1, ZIndex = 1,
+		}, wrap)
+		local tail = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, Size = UDim2.fromOffset(10, 10),
+			Position = UDim2.new(mine and 0 or 1, 0, 1, -11), BorderSizePixel = 0, BackgroundColor3 = shade, ZIndex = 1,
+		}, tailHolder)
+		new("UIStroke", { Thickness = 2, Color = ink, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, tail)
+
+		-- kotak chat retro: garis hitam tebal + bayangan ungu di bawah
+		local body = new("Frame", {
+			LayoutOrder = mine and 1 or 2, Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY,
+			BorderSizePixel = 0, BackgroundColor3 = fill, ZIndex = 2,
+		}, wrap)
+		new("UICorner", { CornerRadius = UDim.new(0, 4) }, body)
+		new("UIStroke", { Thickness = 2, Color = ink, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, body)
+		new("Frame", {
+			Position = UDim2.new(0, 4, 1, -7), Size = UDim2.new(1, -8, 0, 5), BorderSizePixel = 0, BackgroundColor3 = shade, ZIndex = 2,
+		}, body)
+
+		local content = new("Frame", {
+			Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1, ZIndex = 3,
+		}, body)
 		new("UIPadding", {
-			PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
-		}, bubble)
+			PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+		}, content)
 		new("UIListLayout", {
 			Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder,
 			HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left,
-		}, bubble)
+		}, content)
 
 		local function addLabel(text, size, color, order)
 			local l = new("TextLabel", {
 				LayoutOrder = order, Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.XY,
-				BackgroundTransparency = 1, RichText = false, TextWrapped = true, Font = FONT, TextSize = size,
-				TextColor3 = color, Text = text,
+				BackgroundTransparency = 1, RichText = false, TextWrapped = true, Font = CHAT_FONT, TextSize = size,
+				TextColor3 = color, Text = text, ZIndex = 3,
 				TextXAlignment = mine and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left,
-			}, bubble)
+			}, content)
 			new("UISizeConstraint", { MaxSize = Vector2.new(maxW, 10000) }, l)
 		end
-		if not mine then
-			addLabel((fromGame and "[GAME] " or "@") .. tostring(m.name), 11,
-				fromGame and C(120, 200, 255) or C(255, 225, 90), 1)
+		-- 🎮 = dari game Roblox, 🌐 = dari web
+		addLabel((isGame and "🎮 " or "🌐 ") .. "@" .. tostring(m.username), 11, nameCol, 1)
+		addLabel(tostring(m.content), 13, C(30, 25, 50), 2)
+
+		-- animasi muncul (membesar dengan efek memantul)
+		if animate then
+			local sc = new("UIScale", { Scale = 0.4 }, wrap)
+			TS:Create(sc, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 		end
-		addLabel(tostring(m.text), 13, Color3.new(1, 1, 1), 2)
 	end
 
 	local function toBottom()
@@ -422,11 +522,12 @@ do
 	local function fetchNew()
 		if fetching or not currentUsername then return end
 		fetching = true
+		local initial = (lastId == 0)
 		local path
 		if lastId == 0 then
-			path = "messages?select=id,name,text,source&order=id.desc&limit=50"
+			path = "/rest/v1/pesan?select=id,username,content,source&order=id.desc&limit=50"
 		else
-			path = "messages?select=id,name,text,source&id=gt." .. lastId .. "&order=id.asc&limit=100"
+			path = "/rest/v1/pesan?select=id,username,content,source&id=gt." .. lastId .. "&order=id.asc&limit=100"
 		end
 		local data, code = httpRequest("GET", path)
 		if isOk(code) and type(data) == "table" then
@@ -437,7 +538,7 @@ do
 			end
 			for _, m in ipairs(data) do
 				if m.id and m.id > lastId then
-					addMessage(m)
+					addMessage(m, not initial)
 					lastId = m.id
 				end
 			end
@@ -452,17 +553,21 @@ do
 	end
 
 	local function sendMessage(text)
-		if not currentUsername or not currentToken then return end
+		if not currentUsername or not accessToken then return end
 		if text:match("^%s*$") then return end
-		local _, code = httpRequest("POST", "rpc/kirim_chat_roblox", {
-			p_name = currentUsername, p_token = currentToken, p_text = text:sub(1, 500),
-		})
+		text = text:sub(1, 300)
+		local function post()
+			return httpRequest("POST", "/rest/v1/pesan", { content = text, source = "game" }, accessToken, { ["Prefer"] = "return=minimal" })
+		end
+		local data, code = post()
+		if code == 401 and refreshSession() then data, code = post() end
 		if isOk(code) then
 			inputBox.Text = ""
 			fetchNew()
 		else
 			chatSt.TextColor3 = C(255, 120, 120)
-			chatSt.Text = "Gagal kirim (kode " .. tostring(code) .. ")"
+			local msg = type(data) == "table" and data.message or nil
+			chatSt.Text = msg and tostring(msg) or ("Gagal kirim (kode " .. tostring(code) .. ")")
 		end
 	end
 	sendBtn.Activated:Connect(function() sendMessage(inputBox.Text) end)
@@ -471,8 +576,7 @@ do
 	end)
 
 	local polling = false
-	local function startChat(name, token)
-		currentUsername, currentToken = name, token
+	local function startChat()
 		loginPanel.Visible = false
 		chatPanel.Visible = true
 		if polling then return end
@@ -485,60 +589,68 @@ do
 		end)
 	end
 
-	local pendingName, pendingToken = nil, nil
-	local function submitLogin()
-		local text = userBox.Text:lower()
-		if pendingName then
-			local n, t = pendingName, pendingToken
-			pendingName, pendingToken = nil, nil
-			createBtn.Text = "BUAT & MASUK"
-			startChat(n, t)
-			return
+	logoutBtn.Activated:Connect(function()
+		clearSession()
+		currentUsername, accessToken, refreshToken = nil, nil, nil
+		lastId, count = 0, 0
+		for _, c in ipairs(msgs:GetChildren()) do
+			if c:IsA("Frame") then c:Destroy() end
 		end
-		local cn, ct = parseCode(text)
-		if cn then
-			saveLogin(cn, ct)
-			startChat(cn, ct)
-			return
-		end
-		if not text:match("^[a-z0-9_]+$") or #text < 3 or #text > 16 then
+		passBox.Text = ""
+		chatPanel.Visible = false
+		loginPanel.Visible = true
+		loginSt.TextColor3 = C(180, 200, 255)
+		loginSt.Text = "Kamu sudah keluar."
+	end)
+
+	local busy = false
+	local function doAuth(mode)
+		if busy then return end
+		local name = userBox.Text:lower():gsub("%s", "")
+		local pass = passBox.Text
+		if not name:match("^[a-z0-9_]+$") or #name < 3 or #name > 20 then
 			loginSt.TextColor3 = C(255, 100, 100)
-			loginSt.Text = "Username hanya huruf kecil, angka, _ (3-16 karakter)"
+			loginSt.Text = "Username hanya huruf kecil, angka, _ (3-20 karakter)"
 			return
 		end
+		if #pass < 6 then
+			loginSt.TextColor3 = C(255, 100, 100)
+			loginSt.Text = "Password minimal 6 karakter"
+			return
+		end
+		busy = true
 		loginSt.TextColor3 = C(255, 200, 50)
-		loginSt.Text = "Membuat username..."
-		local data, code = httpRequest("POST", "rpc/daftar_username_roblox", { p_name = text })
-		if isOk(code) and type(data) == "table" and data.token then
-			local copied = pcall(function() setclipboard(text .. "|" .. data.token) end)
-			if saveLogin(text, data.token) then
-				loginSt.TextColor3 = C(120, 255, 150)
-				loginSt.Text = "Berhasil dibuat & tersimpan!" .. (copied and " Kode akun juga disalin ke clipboard." or "")
-				task.wait(0.5)
-				startChat(text, data.token)
-			else
-				pendingName, pendingToken = text, data.token
-				userBox.Text = text .. "|" .. data.token
-				createBtn.Text = "SUDAH KUSALIN, MASUK"
-				loginSt.TextColor3 = C(255, 200, 50)
-				loginSt.Text = (copied and "Kode akun sudah disalin ke clipboard. " or "")
-					.. "File tidak bisa disimpan: simpan kode di kotak atas (Catatan HP), lalu tap tombol hijau."
-			end
-		elseif isOk(code) and type(data) == "table" and data.error == "taken" then
-			loginSt.TextColor3 = C(255, 90, 90)
-			loginSt.Text = "@" .. text .. " sudah dipakai, coba yang lain."
+		loginSt.Text = mode == "reg" and "Membuat akun..." or "Masuk..."
+		local ok, err = authenticate(mode, name, pass)
+		busy = false
+		if ok then
+			passBox.Text = ""
+			loginSt.TextColor3 = C(120, 255, 150)
+			loginSt.Text = "Berhasil!"
+			startChat()
 		else
 			loginSt.TextColor3 = C(255, 90, 90)
-			loginSt.Text = "Gagal terhubung (kode " .. tostring(code) .. "). Chat butuh executor dengan HTTP."
+			loginSt.Text = tostring(err)
 		end
 	end
-	createBtn.Activated:Connect(submitLogin)
-	userBox.FocusLost:Connect(function(enter) if enter then submitLogin() end end)
+	regBtn.Activated:Connect(function() doAuth("reg") end)
+	logBtn.Activated:Connect(function() doAuth("log") end)
+	passBox.FocusLost:Connect(function(enter) if enter then doAuth("log") end end)
 
-	-- auto login kalau akun sudah tersimpan
-	local savedName, savedToken = loadLogin()
+	-- auto login kalau sesi sudah tersimpan
+	local savedName, savedRefresh = loadSession()
 	if savedName then
-		task.defer(function() startChat(savedName, savedToken) end)
+		refreshToken = savedRefresh
+		task.defer(function()
+			if refreshSession() then
+				currentUsername = savedName
+				startChat()
+			else
+				refreshToken = nil
+				loginSt.TextColor3 = C(255, 200, 50)
+				loginSt.Text = "Sesi habis, silakan masuk lagi."
+			end
+		end)
 	end
 end
 
